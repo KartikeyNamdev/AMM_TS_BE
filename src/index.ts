@@ -1,7 +1,15 @@
 import express from "express";
-import swapPotatoesForApples from "./potatoAppleLP.js";
+import { swapXForY, swapYForX } from "./potatoAppleLP.js";
 
 const app = express();
+const allPools: pool[] = [];
+type pool = {
+  asset1: string;
+  asset1Amount: number;
+  asset2: string;
+  asset2Amount: number;
+  k: number;
+};
 
 app.use(express.json());
 
@@ -10,52 +18,158 @@ app.get("/", (req, res) => {
     message: "Welcome to AMM ",
   });
 });
-let potatoAppleLP = {
-  potatoes: 50000,
-  apples: 50000,
-  k: 50000 * 50000,
-};
 app.post("/swap", (req, res) => {
-  const potatoesAmount = req.body.potatoesAmount;
-  if (!potatoesAmount) {
+  const { asset1, asset2, fromAsset, amount } = req.body;
+
+  if (!asset1 || !asset2 || !fromAsset || !amount) {
     res.json({
-      error: "Please provide potatoes amount",
+      error: "Please provide asset1, asset2, fromAsset, and amount",
     });
     return;
   }
-  try {
-    const result = swapPotatoesForApples(potatoAppleLP, potatoesAmount);
-    potatoAppleLP = result.newPool;
+
+  const poolIndex = allPools.findIndex(
+    (p) =>
+      (p.asset1 === asset1 && p.asset2 === asset2) ||
+      (p.asset1 === asset2 && p.asset2 === asset1),
+  );
+
+  if (poolIndex === -1) {
     res.json({
-      message: `Traded your ${potatoesAmount} potatoes for ${result.extraApples} apples`,
+      error: "Pool not found",
     });
+    return;
+  }
+
+  const pool = allPools[poolIndex]!;
+  // Map pool to LP type: x = asset1Amount, y = asset2Amount
+  const lp = {
+    x: pool.asset1Amount,
+    y: pool.asset2Amount,
+    k: pool.k,
+  };
+
+  try {
+    let result;
+    if (fromAsset === pool.asset1) {
+      result = swapXForY(lp, amount);
+      pool.asset1Amount = result.newPool.x;
+      pool.asset2Amount = result.newPool.y;
+      res.json({
+        message: `Traded ${amount} ${pool.asset1} for ${result.extraY} ${pool.asset2}`,
+        pool,
+      });
+    } else if (fromAsset === pool.asset2) {
+      result = swapYForX(lp, amount);
+      pool.asset1Amount = result.newPool.x;
+      pool.asset2Amount = result.newPool.y;
+      res.json({
+        message: `Traded ${amount} ${pool.asset2} for ${result.extraX} ${pool.asset1}`,
+        pool,
+      });
+    } else {
+      res.json({
+        error: "fromAsset must be one of the pool assets",
+      });
+    }
   } catch (e) {
     res.json({
-      error: e,
+      error: e instanceof Error ? e.message : String(e),
     });
   }
 });
 app.get("/ticker", (req, res) => {
   res.json({
-    message: potatoAppleLP,
+    pools: allPools,
   });
 });
 
-app.post("/addLiquidity", (req, res) => {
-  const { potatoesAmount, applesAmount } = req.body;
-  if (!potatoesAmount || !applesAmount) {
+app.get("/getRatio", (req, res) => {
+  const { asset1, asset2 } = req.body;
+  const pool = allPools.find(
+    (p) =>
+      (p.asset1 === asset1 && p.asset2 === asset2) ||
+      (p.asset1 === asset2 && p.asset2 === asset1),
+  );
+
+  if (!pool) {
+    res.json({ error: "Pool not found" });
+    return;
+  }
+
+  const ratio = pool.asset1Amount / pool.asset2Amount;
+  res.json({
+    asset1: pool.asset1,
+    asset2: pool.asset2,
+    ratio,
+  });
+});
+app.post("/addPool", (req, res) => {
+  const asset1 = req.body.asset1;
+  const asset1Amount = req.body.asset1Amount;
+  const asset2 = req.body.asset2;
+  const asset2Amount = req.body.asset2Amount;
+
+  if (!asset1 || !asset1Amount || !asset2 || !asset2Amount) {
     res.json({
-      error: "Please provide potatoes and apples amount",
+      error: "Please provide all the required fields",
     });
     return;
   }
 
-  potatoAppleLP.potatoes += potatoesAmount;
-  potatoAppleLP.apples += applesAmount;
+  const newPool = {
+    asset1: asset1,
+    asset1Amount: asset1Amount,
+    asset2: asset2,
+    asset2Amount: asset2Amount,
+    k: asset1Amount * asset2Amount,
+  };
+  allPools.push(newPool);
   res.json({
-    message: {
-      potatoAppleLP,
-    },
+    message: "Pool added successfully",
+    newPool,
+  });
+});
+app.post("/addLiquidity", (req, res) => {
+  const { asset1, asset2, asset1Amount, asset2Amount } = req.body;
+  if (!asset1 || !asset2 || !asset1Amount || !asset2Amount) {
+    res.json({
+      error: "Please provide assets name and assets amount",
+    });
+    return;
+  }
+  const pool = allPools.find(
+    (p) =>
+      (p.asset1 === asset1 && p.asset2 === asset2) ||
+      (p.asset1 === asset2 && p.asset2 === asset1),
+  );
+
+  if (!pool) {
+    res.json({
+      error: "Pool not found",
+    });
+    return;
+  }
+
+  // Ratio of x and y should be same before or after adding liquidity
+  const currentRatio = pool.asset1Amount / pool.asset2Amount;
+  const contributionRatio = asset1Amount / asset2Amount;
+
+  // Allow for small floating point differences
+  if (Math.abs(currentRatio - contributionRatio) > 0.000001) {
+    res.json({
+      error: `Current ratio is ${currentRatio}. You must add liquidity in the same ratio.`,
+    });
+    return;
+  }
+
+  pool.asset1Amount += asset1Amount;
+  pool.asset2Amount += asset2Amount;
+  pool.k = pool.asset1Amount * pool.asset2Amount;
+
+  res.json({
+    message: "Liquidity added successfully",
+    pool,
   });
 });
 app.listen(3000, () => {
